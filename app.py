@@ -8,8 +8,11 @@ from sklearn.decomposition import PCA
 reps = pd.read_csv("train_reps.tsv", sep="\t", index_col="sample_id")
 anno = pd.read_csv("train_anno.tsv", sep="\t", index_col="sample_id").loc[reps.index]
 
-pca = PCA(n_components=3)
-df = pd.DataFrame(pca.fit_transform(reps), columns=["PC1", "PC2", "PC3"], index=reps.index)
+N_PCS = 5
+PCS = [f"PC{i + 1}" for i in range(N_PCS)]
+
+pca = PCA(n_components=N_PCS)
+df = pd.DataFrame(pca.fit_transform(reps), columns=PCS, index=reps.index)
 df = df.join(anno[["cancer_type", "primary_site", "color"]]).reset_index()
 var = pca.explained_variance_ratio_ * 100
 
@@ -21,9 +24,9 @@ MODES = {
     "primary_site": ("Primary site", site_color),
 }
 
-# Fixed axis ranges so the axes don't jump when groups are toggled.
-pad = 0.05 * (df[["PC1", "PC2", "PC3"]].max() - df[["PC1", "PC2", "PC3"]].min())
-RANGES = {pc: [df[pc].min() - pad[pc], df[pc].max() + pad[pc]] for pc in ["PC1", "PC2", "PC3"]}
+# Fixed axis ranges so the axes don't jump when groups or PCs are changed.
+pad = 0.05 * (df[PCS].max() - df[PCS].min())
+RANGES = {pc: [df[pc].min() - pad[pc], df[pc].max() + pad[pc]] for pc in PCS}
 
 
 def groups(mode):
@@ -67,6 +70,19 @@ app.layout = html.Div(
             style={"flex": 1, "padding": "10px", "borderLeft": "1px solid #ddd",
                    "display": "flex", "flexDirection": "column", "minWidth": "240px"},
             children=[
+                html.H4("Axes", style={"margin": "8px 0"}),
+                html.Div(style={"display": "flex", "gap": "8px", "marginBottom": "12px"}, children=[
+                    html.Div(style={"flex": 1}, children=[
+                        html.Label(axis_label, style={"fontSize": "0.85em", "color": "#555"}),
+                        dcc.Dropdown(
+                            id=f"axis-{axis_label}",
+                            options=[{"label": f"{pc} ({var[i]:.0f}%)", "value": pc} for i, pc in enumerate(PCS)],
+                            value=default,
+                            clearable=False,
+                        ),
+                    ])
+                    for axis_label, default in zip(["X", "Y", "Z"], PCS[:3])
+                ]),
                 html.H4("Label by", style={"margin": "8px 0"}),
                 dcc.RadioItems(
                     id="mode",
@@ -98,6 +114,23 @@ app.layout = html.Div(
 
 # ---- Callbacks ----
 @app.callback(
+    Output("axis-X", "options"),
+    Output("axis-Y", "options"),
+    Output("axis-Z", "options"),
+    Input("axis-X", "value"),
+    Input("axis-Y", "value"),
+    Input("axis-Z", "value"),
+)
+def update_axis_options(x_pc, y_pc, z_pc):
+    """Each dropdown offers every PC except the ones already taken by the other two."""
+    chosen = {"axis-X": x_pc, "axis-Y": y_pc, "axis-Z": z_pc}
+    def opts(axis_id):
+        taken = {v for k, v in chosen.items() if k != axis_id}
+        return [{"label": f"{pc} ({var[i]:.0f}%)", "value": pc} for i, pc in enumerate(PCS) if pc not in taken]
+    return opts("axis-X"), opts("axis-Y"), opts("axis-Z")
+
+
+@app.callback(
     *[Output(f"groups-{m}", "style") for m in MODES],
     *[Output(f"groups-{m}", "value") for m in MODES],
     Input("mode", "value"),
@@ -117,9 +150,12 @@ def update_checklist(mode, _all, _clear):
 @app.callback(
     Output("plot", "figure"),
     Input("mode", "value"),
+    Input("axis-X", "value"),
+    Input("axis-Y", "value"),
+    Input("axis-Z", "value"),
     *[Input(f"groups-{m}", "value") for m in MODES],
 )
-def update_figure(mode, *values):
+def update_figure(mode, x_pc, y_pc, z_pc, *values):
     name, colors = MODES[mode]
     selected = set(dict(zip(MODES, values))[mode] or [])
     fig = go.Figure()
@@ -128,7 +164,7 @@ def update_figure(mode, *values):
             continue
         d = df[df[mode] == g]
         fig.add_trace(go.Scatter3d(
-            x=d.PC1, y=d.PC2, z=d.PC3,
+            x=d[x_pc], y=d[y_pc], z=d[z_pc],
             mode="markers",
             name=g,
             marker={"size": 3, "color": colors[g], "opacity": 0.8},
@@ -136,13 +172,14 @@ def update_figure(mode, *values):
             hovertemplate="%{customdata[0]}<br>Cancer type: %{customdata[1]}"
                           "<br>Primary site: %{customdata[2]}<extra></extra>",
         ))
-    axis = lambda i: {"title": f"PC{i + 1} ({var[i]:.1f}%)", "range": RANGES[f"PC{i + 1}"]}
+    axis = lambda pc: {"title": f"{pc} ({var[PCS.index(pc)]:.1f}%)", "range": RANGES[pc]}
     fig.update_layout(
         template="plotly_white",
         uirevision="keep",  # keep the camera where the visitor left it
         margin={"l": 0, "r": 0, "t": 40, "b": 0},  # top margin keeps the toolbar off the legend
         legend={"title": {"text": name}, "itemsizing": "constant"},
-        scene={"xaxis": axis(0), "yaxis": axis(1), "zaxis": axis(2), "aspectmode": "cube"},
+        scene={"xaxis": axis(x_pc), "yaxis": axis(y_pc), "zaxis": axis(z_pc),
+               "aspectmode": "cube", "dragmode": "orbit"},
     )
     return fig
 
